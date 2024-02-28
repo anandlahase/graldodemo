@@ -1,0 +1,260 @@
+name: Create Job Manifest
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: 'Release Tag'
+        required: true
+        type: string
+      release_status:
+        description: 'Release Status'
+        required: true
+        default: 'null'
+        type: string
+
+
+env:
+  CONFIG_REPO: spokencloud/aec-azure-tf-infra-configs
+  AUTHOR: "AEC Infrastructure Team"
+  SOURCE_DIR: 'template'
+  DESTINATION_GITHUB_ORG: 'spokencloud'
+  DESTINATION_REPO_NAME: 'aec-azure-tfc-automation-jobManifests'
+  app_source_branch: 'main'
+  config_source_branch: 'main'
+  version_type_to_change: 'fix'
+  application: 'landing-zone'
+  TEMP_BRANCH: 'jenkins_template_update_with_${{ inputs.release_tag }}'
+  destination_branch: 'main'
+
+jobs:
+  CreateJobTemplate:
+    if: inputs.release_status == 'success'
+    name: 'Create Job Template for Jenkins'
+    runs-on: ubuntu-latest
+
+    steps:
+     
+      - name: Print Target Branch
+        run: |
+          echo "Destination branch for target repo : ${{ env.destination_branch }}"
+
+      - name: Checkout the Terraform Job Template repo (jtemplate_repo)
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ env.DESTINATION_GITHUB_ORG }}/${{ env.DESTINATION_REPO_NAME }}
+          ref: ${{ env.destination_branch }}
+          path: jtemplate_repo
+          token: ${{ secrets.WORKFLOW_GITHUB_AUTH_TOKEN_GOW_BRPROMOTION }}
+
+      - name: Get OID & Sequence from current template
+        run: |
+          oid=$(cat jtemplate_repo/${{ env.application }}/${{ env.application }}_jobmanifest.json | jq '.oid')
+          echo oid=$oid >> $GITHUB_ENV
+          echo $oid
+          sequence=$(cat jtemplate_repo/${{ env.application }}/${{ env.application }}_jobmanifest.json | jq '.sequence')
+          echo sequence=$sequence >> $GITHUB_ENV
+          echo $sequence  
+
+      - name: Checkout the Code Repo
+        uses: actions/checkout@v3
+
+      - name: print code_tag
+        run: echo ${{ inputs.release_tag }}
+
+      - name: Get latest release tag from CONFIG_REPO
+        id: config_tag
+        uses: oprypin/find-latest-tag@v1
+        with:
+          repository: ${{ env.CONFIG_REPO }}
+          token: ${{ secrets.WORKFLOW_GITHUB_AUTH_TOKEN_GOW_BRPROMOTION }}
+
+      - name: Set CONFIG_REPO release tag as environment variable
+        if: steps.config_tag.outcome == 'success'
+        run: echo "CONFIG_REPO_RELEASE_VERSION=${{ steps.config_tag.outputs.tag }}" >> $GITHUB_ENV
+
+      - name: print config_tag
+        run: echo $CONFIG_REPO_RELEASE_VERSION
+
+      - name: Prepare json string for the job template
+        id: prepare_json_template_1
+        run: |
+          if [[ -d template ]]; then
+            echo "template directory exists"
+          else
+            mkdir template
+          fi
+          echo json_string=$( jq -n \
+          --arg id "$(uuidgen)" \
+          --arg tmpversion "latest" \
+          --arg ts "$(date +"%Y-%m-%dT%T")" \
+          --arg jn "job-tfc-${{ env.application }}" \
+          --arg description "${{ env.application }} TFC workspace" \
+          --arg configfile_name "landingZone.auto.tfvars" \
+          --arg configfile_path "landingZone.auto.tfvars" \
+          --arg author "${{ env.AUTHOR }}" \
+          --arg coderepo "https://github.com/spokencloud/${{ github.event.repository.name }}" \
+          --arg coderepo_name "${{ github.event.repository.name }}" \
+          --arg coderepo_version "${{ inputs.release_tag }}" \
+          --arg configrepo "https://github.com/spokencloud/aec-azure-tf-infra-configs" \
+          --arg configrepo_name "aec-azure-tf-infra-configs" \
+          --arg configrepo_version "$CONFIG_REPO_RELEASE_VERSION" \
+          --arg job_oid "${{ env.oid }}" \
+          --arg job_sequence "${{ env.sequence }}" \
+                      '{kind: "job",
+            type: "terraform",
+            subtype: "tfc",
+            version: $tmpversion,
+            oid: $job_oid,
+            sequence: $job_sequence,
+            metadata: {guid: "f9e1e2a4-6a8c-431b-a409-508cbb14b9ff", uuid: $id, name: $jn, description: $description, created: $ts, author: $author},
+            tags: { "provisioning": "infrastructure", "workspace": "${{ env.application }}" },
+            payload:{
+              repo:  {url: $coderepo, version: $coderepo_version},
+              config_repo:{url: $configrepo, version: $configrepo_version, varfile_name: "templates/\($configfile_path)"}
+              },
+          load_global_vars: [0],
+          target: "shared",
+          }' ) >> $GITHUB_OUTPUT
+
+      - name: Prepare json string for the job template
+        id: prepare_json_template_2
+        run: |
+          if [[ -d template ]]; then
+            echo "template directory exists"
+          else
+            mkdir template
+          fi
+          echo json_string2=$( jq -n \
+          --arg id "$(uuidgen)" \
+          --arg tmpversion "${{ inputs.release_tag }}" \
+          --arg ts "$(date +"%Y-%m-%dT%T")" \
+          --arg jn "job-tfc-${{ env.application }}" \
+          --arg description "${{ env.application }} TFC workspace" \
+          --arg configfile_name "landingZone.auto.tfvars" \
+          --arg configfile_path "landingZone.auto.tfvars" \
+          --arg author "${{ env.AUTHOR }}" \
+          --arg coderepo "https://github.com/spokencloud/${{ github.event.repository.name }}" \
+          --arg coderepo_name "${{ github.event.repository.name }}" \
+          --arg coderepo_version "${{ inputs.release_tag }}" \
+          --arg configrepo "https://github.com/spokencloud/aec-azure-tf-infra-configs" \
+          --arg configrepo_name "aec-azure-tf-infra-configs" \
+          --arg configrepo_version "$CONFIG_REPO_RELEASE_VERSION" \
+          --arg job_oid "${{ env.oid }}" \
+          --arg job_sequence "${{ env.sequence }}" \
+                      '{kind: "job",
+            type: "terraform",
+            subtype: "tfc",
+            version: $tmpversion,
+            oid: $job_oid,
+            sequence: $job_sequence,
+            metadata: {guid: "f9e1e2a4-6a8c-431b-a409-508cbb14b9ff", uuid: $id, name: $jn, description: $description, created: $ts, author: $author},
+            tags: { "provisioning": "infrastructure", "workspace": "${{ env.application }}" },
+            payload:{
+              repo:  {url: $coderepo, version: $coderepo_version},
+              config_repo:{url: $configrepo, version: $configrepo_version, varfile_name: "templates/\($configfile_path)"}
+              },
+          load_global_vars: [0],
+          target: "shared",
+          }' ) >> $GITHUB_OUTPUT
+
+      - name: format pre-requsite string to Json; create Job latest template
+        uses: jsdaniell/create-json@v1.2.1
+        with:
+          name: "tmp_${{ env.application }}_jobmanifest.json"
+          json: ${{ steps.prepare_json_template_1.outputs.json_string }}
+          dir: "${{ env.SOURCE_DIR }}/"
+
+      - name: format pre-requsite string to Json; create Job template with version
+        uses: jsdaniell/create-json@v1.2.1
+        with:
+          name: "tmp_${{ inputs.release_tag }}#${{ env.application }}_jobmanifest.json"
+          json: ${{ steps.prepare_json_template_2.outputs.json_string2 }}
+          dir: "${{ env.SOURCE_DIR }}/"
+
+      - name: install JQ on runner
+        id: install_jq
+        run: sudo apt-get install -y jq
+       
+      - name: Prettyfy json using JQ
+        run: |
+          jq . ${{ env.SOURCE_DIR }}/tmp_${{ env.application }}_jobmanifest.json > template/${{ env.application }}_jobmanifest.json
+          jq . ${{ env.SOURCE_DIR }}/tmp_${{ inputs.release_tag }}#${{ env.application }}_jobmanifest.json > template/${{ inputs.release_tag }}#${{ env.application }}_jobmanifest.json
+          rm ${{ env.SOURCE_DIR }}/tmp_${{ env.application }}_jobmanifest.json
+          rm ${{ env.SOURCE_DIR }}/tmp_${{ inputs.release_tag }}#${{ env.application }}_jobmanifest.json
+
+      - name: Print json file
+        run: |
+          cat ${{ env.SOURCE_DIR }}/${{ env.application }}_jobmanifest.json
+          cat ${{ env.SOURCE_DIR }}/${{ inputs.release_tag }}#${{ env.application }}_jobmanifest.json
+
+      - name: Fail here
+        run: exit 0
+
+      - name: Checkout the Terraform Job Template repo
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ env.DESTINATION_GITHUB_ORG }}/${{ env.DESTINATION_REPO_NAME }}
+          ref: ${{ env.destination_branch }}
+          path: jtemplate_repo_temp
+          token: ${{ secrets.WORKFLOW_GITHUB_AUTH_TOKEN_GOW_BRPROMOTION }}
+
+      - name: Copy files
+        run: |
+          if [[ -d jtemplate_repo_temp/${{ env.application }} ]]; then
+            cp -R ${{ env.SOURCE_DIR }}/* jtemplate_repo_temp/${{ env.application }}/
+          else
+            mkdir -p jtemplate_repo_temp/${{ env.application }}
+            cp -R ${{ env.SOURCE_DIR }}/* jtemplate_repo_temp/${{ env.application }}/
+          fi
+
+      - name: Create, push new branch with template changes
+        uses: EndBug/add-and-commit@v9
+        with:
+          cwd: './jtemplate_repo_temp/${{ env.application }}'
+          add: '["${{ env.application }}_jobmanifest.json", "${{ inputs.release_tag }}#${{ env.application }}_jobmanifest.json"]'
+          default_author: github_actions
+          message: 'fix: Update Jenkis Job Template'
+          new_branch: ${{ env.TEMP_BRANCH }}
+
+      - name: Checkout the Terraform Job Template repo Again
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ env.DESTINATION_GITHUB_ORG }}/${{ env.DESTINATION_REPO_NAME }}
+          token: ${{ secrets.WORKFLOW_GITHUB_AUTH_TOKEN_GOW_BRPROMOTION }}
+
+      - name: Create Pull Request
+        id: create_pr
+        uses: repo-sync/pull-request@v2
+        with:
+          destination_branch: ${{ env.destination_branch }}
+          source_branch: ${{ env.TEMP_BRANCH }}
+          pr_title: "fix: Update_Jenkins_Job_Template with ${{ inputs.release_tag }}"
+          github_token: ${{ secrets.WORKFLOW_GITHUB_AUTH_TOKEN_GOW_BRPROMOTION }}
+          pr_label: "jenkinstemplate,automerge"
+
+      - name: Approve pull request
+        if: steps.create_pr.outcome == 'success'
+        id: approve_pr
+        uses: juliangruber/approve-pull-request-action@v2.0.0
+        with:
+          github-token: ${{ secrets.WORKFLOW_GIT_AUTH_TOKEN_VJ_BRPROMOTION }}
+          number: ${{ steps.create_pr.outputs.pr_number }}
+          repo: ${{ env.DESTINATION_GITHUB_ORG }}/${{ env.DESTINATION_REPO_NAME }}
+
+      - name: Merge pull Request
+        if: steps.create_pr.outcome == 'success' && steps.approve_pr.outcome == 'success'
+        id: merge_pr
+        uses: pascalgn/automerge-action@v0.15.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.WORKFLOW_GITHUB_AUTH_TOKEN_GOW_BRPROMOTION }}
+          PULL_REQUEST: ${{ env.DESTINATION_GITHUB_ORG }}/${{ env.DESTINATION_REPO_NAME }}/${{ steps.create_pr.outputs.pr_number }}
+          UPDATE_METHOD: merge
+
+      - name: Delete merge branch
+        uses: dawidd6/action-delete-branch@v3
+        with:
+          github_token: ${{ secrets.WORKFLOW_GITHUB_AUTH_TOKEN_GOW_BRPROMOTION }}
+          owner: ${{ env.DESTINATION_GITHUB_ORG }}
+          repository: ${{ env.DESTINATION_REPO_NAME }}
+          branches: ${{ env.TEMP_BRANCH }}

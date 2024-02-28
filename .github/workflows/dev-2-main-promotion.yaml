@@ -1,0 +1,138 @@
+name: 2. Promote Dev => Main
+
+on:
+  repository_dispatch:
+    types: [AEC-DEV-2-MAIN]    
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release Tag'
+        required: true
+        default: 'dev-v0.0.1'
+  workflow_call:
+    inputs:
+      release_tag:
+        description: 'Release Tag'
+        required: true
+        type: string
+    outputs:
+      release_tag:
+        description: "Created Release Tag"
+        value: ${{ jobs.PromoteRelease.outputs.release_tag }}
+   paths:
+      - 'non-prod/deploymentManifest'
+      - 'non-prod/extraVars'
+      - 'non-prod/inventory'
+  workflow_dispatch:
+ 
+
+env:
+  SOURCE_BRANCH: dev
+  DESTINATION_BRANCH: main
+  TEMP_BRANCH: dev2main
+
+jobs:
+  PromoteRelease:
+    name: 'Promote Dev release to Main branch'
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    outputs:
+      release_tag: ${{ steps.get_target_tag.outputs.result }}
+      release_status: ${{ steps.create_release.outcome }}
+
+    steps:
+      - name: Set environment variables
+        run: |
+          if [[ ${{ github.event_name }} == 'repository_dispatch' ]]; then
+          echo "release_tag=${{ github.event.client_payload.release_tag }}" >> $GITHUB_ENV
+          else
+          echo "release_tag=${{ inputs.release_tag }}" >> $GITHUB_ENV
+          fi  
+
+      - name : print key inputs
+        run: |
+          echo "Release Tag: ${{ env.release_tag }}"
+          echo "Source Branch: ${{ env.SOURCE_BRANCH }}"
+          echo "Destination Branch: ${{ env.DESTINATION_BRANCH }}"
+
+      - name: Checkout the Terraform code Repo - (this repo)
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ env.SOURCE_BRANCH }}
+       
+      - name: Checkout Tag
+        run: |
+          git pull
+          git checkout tags/${{ env.release_tag }} -b ${{ env.TEMP_BRANCH }}
+
+      - name: Push to Branch
+        run: |
+          git push --set-upstream origin ${{ env.TEMP_BRANCH }}
+
+      - name: Create Pull Request
+        id: create_pr
+        uses: repo-sync/pull-request@v2
+        with:
+          source_branch: ${{ env.TEMP_BRANCH }}
+          destination_branch: ${{ env.DESTINATION_BRANCH }}
+          pr_title: "Promote ${{ env.SOURCE_BRANCH }} release:${{ env.release_tag }} => ${{ env.DESTINATION_BRANCH }}"
+          github_token: ${{ github.token }}
+          pr_label: "automerge"
+
+      - name: Approve pull request
+        if: steps.create_pr.outcome == 'success'
+        id: approve_pr
+        uses: hmarr/auto-approve-action@v3
+        with:
+          github-token: ${{ secrets.WORKFLOW_GITHUB_AUTH_TOKEN_GOW_BRPROMOTION }}
+          pull-request-number: ${{ steps.create_pr.outputs.pr_number }}
+
+      - name: Merge pull Request
+        if: steps.create_pr.outcome == 'success' && steps.approve_pr.outcome == 'success'
+        id: merge_pr
+        uses: pascalgn/automerge-action@v0.15.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.WORKFLOW_GITHUB_AUTH_TOKEN_GOW_BRPROMOTION }}
+          PULL_REQUEST: ${{ steps.create_pr.outputs.pr_number }}
+          UPDATE_METHOD: merge
+
+      - name: Delete merge branch
+        uses: dawidd6/action-delete-branch@v3
+        with:
+          github_token: ${{ github.token }}
+          branches: ${{ env.TEMP_BRANCH }}
+
+      - name: Figure out target release tag (replace source branch with target branch name)
+        id: get_target_tag
+        uses: bluwy/substitute-string-action@v1
+        with:
+          _input-text: ${{ env.release_tag }}
+          dev-:
+
+      - name: Print Calculated Target tag
+        run: echo ${{ steps.get_target_tag.outputs.result }}
+
+      - name: Create Release
+        id: create_release
+        if: steps.merge_pr.outputs.mergeResult == 'merged'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get_target_tag.outputs.result }}
+          name: ${{ steps.get_target_tag.outputs.result }}
+          target_commitish: ${{ env.DESTINATION_BRANCH }}
+          body: |
+            Changes in this Release
+            - Code with release tag ${{ env.release_tag }} promoted from ${{ env.SOURCE_BRANCH }} branch
+           
+  Call-create-job-template:
+    name: "Create Jenkins Job Template"
+    needs: [PromoteRelease]
+    uses: ./.github/workflows/create-tfc-job-manifest.yaml
+    with:
+      release_tag: ${{ needs.PromoteRelease.outputs.release_tag }}
+      release_status: ${{ needs.PromoteRelease.outputs.release_status }}
+    secrets: inherit

@@ -1,0 +1,178 @@
+name: 1. Release Management
+
+on:
+  pull_request:
+    branches: [ dev ]
+    types:
+      - opened
+      - synchronize
+      - closed
+  workflow_dispatch:
+env:
+  BRANCH: dev
+
+jobs:
+     
+  CreateReadMe:
+    if: github.event.action == 'opened'
+    name: 'Create or Update Readme:'
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout the Terraform code Repo - (this repo)
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Pull code
+        run: |
+          git pull
+      - name: Render terraform docs inside the README.md and push changes back to PR branch
+        uses: terraform-docs/gh-actions@v1.0.0
+        with:
+          working-dir: .
+          output-file: README.md
+          output-method: replace
+          git-push: "true"
+          git-commit-message: "fix:update readme file"
+ 
+  ValidateVariables:
+    name: 'Validate dev Vars:'
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    strategy:
+      matrix:
+        workspaces: [landingZone]
+        templates: [templates]
+
+    steps:
+      - name: Checkout the Terraform Code repo(code_repo) - (this repo)
+        uses: actions/checkout@v3
+        with:
+          path: code_repo
+
+      - name: Print code_repo details
+        run: |
+          echo "pwd:-------------"
+          pwd
+          echo "ls:-------------"
+          ls
+          echo "ls code_repo:-------------"
+          ls code_repo
+          echo "cd code_repo, git branch:-------------"
+          cd code_repo
+          git branch
+
+      - name: Checkout the Terraform Config repo (config_repo)
+        uses: actions/checkout@v3
+        with:
+          repository: spokencloud/aec-azure-tf-infra-configs
+          ref: main
+          path: config_repo
+          token: ${{ secrets.WORKFLOW_GITHUB_AUTH_TOKEN_GOW_BRPROMOTION }}
+
+      - name: Print config_repo details
+        run: |
+          echo "pwd:-------------"
+          pwd
+          echo "ls:-------------"
+          ls
+          echo "ls config_repo:-------------"
+          ls config_repo
+          echo "cd config_repo, git branch:-------------"
+          cd config_repo
+          git branch
+
+      - name: Get varibles list from variable.tf file from TF code
+        working-directory: ./code_repo/
+        run: |
+          cat variables.tf | grep "^variable "  |cut -d '"' -f 2 |sort -u > ${{ matrix.workspaces }}.txt
+
+      - name: Get all variables from config template - ${{ matrix.templates }}
+        working-directory: ./config_repo/
+        run: |
+          cat ${{ matrix.templates }}/${{ matrix.workspaces }}.auto.tfvars | grep -v '^#' | grep -v '^ ' | grep '='  | cut -d '=' -f 1 | perl -p -e "s/ //g" | sort -u > ${{ matrix.workspaces }}-${{ matrix.templates }}.txt
+
+      - name: Compare varibles from TF code to the config template
+        run: |
+          missing_vars=$(comm -23 ./code_repo/${{ matrix.workspaces }}.txt ./config_repo/${{ matrix.workspaces }}-${{ matrix.templates }}.txt)
+          echo "missing_vars"
+          echo vars_${{ matrix.templates }}=$missing_vars >> $GITHUB_ENV
+
+      - name: Comparision status
+        run: |
+          if [[ ! -z "$vars_${{ matrix.templates }}" ]]; then
+            echo "Following variables are missing in template: $vars_${{ matrix.templates }}"
+            echo "template_match=false" >> $GITHUB_ENV
+          else
+            echo "TF code variables matches config template"
+            echo "template_match=true" >> $GITHUB_ENV
+          fi
+
+      - name: Fail for missing variables
+        if: env.template_match == 'false'
+        run: diff ./code_repo/${{ matrix.workspaces }}.txt ./config_repo/${{ matrix.workspaces }}-${{ matrix.templates }}.txt | grep "^<" | awk '{print $2}'
+
+  CreateReleases:
+    name: "Release dev:"
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    outputs:
+      release_tag: ${{ steps.release_version.outputs.tag_name }}
+      release_status: ${{ steps.release_version.outcome }}
+
+    if: ${{ always() && contains(join(needs.*.result, ','), 'success') }}
+    needs: [ ValidateVariables ]
+    steps:
+
+      - name: Create new version
+        id: create_release
+        if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.title, 'Release-')
+        uses: google-github-actions/release-please-action@v3
+        with:
+          release-type: terraform-module
+          default-branch: ${{ env.BRANCH }}
+          monorepo-tags: true
+          component: ${{ env.BRANCH }}
+          labels: |
+            autorelease: pending
+            automerge
+
+      - name: Approve pull request
+        if: steps.create_release.outcome == 'success' && startsWith(github.event.pull_request.title, 'Release-')
+        id: approve_release
+        uses: hmarr/auto-approve-action@v3
+        with:
+          github-token: ${{ secrets.WORKFLOW_GITHUB_AUTH_TOKEN_GOW_BRPROMOTION }}
+          pull-request-number: ${{ fromJson(steps.create_release.outputs.pr).number }}
+
+      - name: Merge pull Request
+        id: merge_release
+        if: steps.create_release.outcome == 'success' && steps.approve_release.outcome == 'success' && startsWith(github.event.pull_request.title, 'Release-')
+        uses: pascalgn/automerge-action@v0.15.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.WORKFLOW_GITHUB_AUTH_TOKEN_GOW_BRPROMOTION }}
+          PULL_REQUEST: ${{ steps.create_release.outputs.pr && fromJson(steps.create_release.outputs.pr).number }}
+          UPDATE_METHOD: merge
+
+      - name: Release Version
+        id: release_version
+        if: steps.merge_release.outputs.mergeResult == 'merged' && startsWith(github.event.pull_request.title, 'Release-')
+        uses: google-github-actions/release-please-action@v3
+        with:
+          release-type: terraform-module
+          default-branch: ${{ env.BRANCH }}
+          monorepo-tags: true
+          component: ${{ env.BRANCH }}
